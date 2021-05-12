@@ -13,20 +13,20 @@ use crate::{CompileError, Syntax};
 #[derive(Debug, PartialEq)]
 pub enum Node<'a> {
     Lit(&'a str, &'a str, &'a str),
-    Comment(WS),
-    Expr(WS, Expr<'a>),
-    Call(WS, Option<&'a str>, &'a str, Vec<Expr<'a>>),
-    LetDecl(WS, Target<'a>),
-    Let(WS, Target<'a>, Expr<'a>),
-    Cond(Vec<(WS, Option<Expr<'a>>, Vec<Node<'a>>)>, WS),
-    Match(WS, Expr<'a>, Vec<When<'a>>, WS),
-    Loop(WS, Target<'a>, Expr<'a>, Vec<Node<'a>>, WS),
+    Comment(Ws),
+    Expr(Ws, Expr<'a>),
+    Call(Ws, Option<&'a str>, &'a str, Vec<Expr<'a>>),
+    LetDecl(Ws, Target<'a>),
+    Let(Ws, Target<'a>, Expr<'a>),
+    Cond(Vec<(Ws, Option<Expr<'a>>, Vec<Node<'a>>)>, Ws),
+    Match(Ws, Expr<'a>, Vec<When<'a>>, Ws),
+    Loop(Ws, Target<'a>, Expr<'a>, Vec<Node<'a>>, Ws),
     Extends(Expr<'a>),
-    BlockDef(WS, &'a str, Vec<Node<'a>>, WS),
-    Include(WS, &'a str),
-    Import(WS, &'a str, &'a str),
+    BlockDef(Ws, &'a str, Vec<Node<'a>>, Ws),
+    Include(Ws, &'a str),
+    Import(Ws, &'a str, &'a str),
     Macro(&'a str, Macro<'a>),
-    Raw(WS, &'a str, WS),
+    Raw(Ws, &'a str, Ws),
 }
 
 #[derive(Debug, PartialEq)]
@@ -66,10 +66,11 @@ impl Expr<'_> {
             BinOp(_, lhs, rhs) => {
                 lhs.is_copyable_within_op(true) && rhs.is_copyable_within_op(true)
             }
+            Range(..) => true,
             // The result of a call likely doesn't need to be borrowed,
             // as in that case the call is more likely to return a
             // reference in the first place then.
-            VarCall(..) | PathCall(..) | MethodCall(..) => true,
+            VarCall(..) | Path(..) | PathCall(..) | MethodCall(..) => true,
             // If the `expr` is within a `Unary` or `BinOp` then
             // an assumption can be made that the operand is copy.
             // If not, then the value is moved and adding `.clone()`
@@ -91,7 +92,7 @@ impl Expr<'_> {
 }
 
 pub type When<'a> = (
-    WS,
+    Ws,
     Option<MatchVariant<'a>>,
     MatchParameters<'a>,
     Vec<Node<'a>>,
@@ -128,10 +129,10 @@ pub enum MatchVariant<'a> {
 
 #[derive(Debug, PartialEq)]
 pub struct Macro<'a> {
-    pub ws1: WS,
+    pub ws1: Ws,
     pub args: Vec<&'a str>,
     pub nodes: Vec<Node<'a>>,
-    pub ws2: WS,
+    pub ws2: Ws,
 }
 
 #[derive(Debug, PartialEq)]
@@ -141,9 +142,9 @@ pub enum Target<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WS(pub bool, pub bool);
+pub struct Ws(pub bool, pub bool);
 
-pub type Cond<'a> = (WS, Option<Expr<'a>>, Vec<Node<'a>>);
+pub type Cond<'a> = (Ws, Option<Expr<'a>>, Vec<Node<'a>>);
 
 fn ws<F, I, O, E>(mut inner: F) -> impl FnMut(I) -> IResult<I, O, E>
 where
@@ -355,12 +356,30 @@ fn expr_var_call(i: &[u8]) -> IResult<&[u8], Expr> {
 fn path(i: &[u8]) -> IResult<&[u8], Vec<&str>> {
     let root = opt(value("", ws(tag("::"))));
     let tail = separated_list1(ws(tag("::")), identifier);
-    let (i, (root, start, _, rest)) = tuple((root, identifier, ws(tag("::")), tail))(i)?;
-    let mut path = Vec::new();
-    path.extend(root);
-    path.push(start);
-    path.extend(rest);
-    Ok((i, path))
+
+    match tuple((root, identifier, ws(tag("::")), tail))(i) {
+        Ok((i, (root, start, _, rest))) => {
+            let mut path = Vec::new();
+            path.extend(root);
+            path.push(start);
+            path.extend(rest);
+            Ok((i, path))
+        }
+        Err(err) => {
+            if let Ok((i, name)) = identifier(i) {
+                // The returned identifier can be assumed to be path if:
+                // - Contains both a lowercase and uppercase character, i.e. a type name like `None`
+                // - Doesn't contain any lowercase characters, i.e. it's a constant
+                // In short, if it contains any uppercase characters it's a path.
+                if name.contains(char::is_uppercase) {
+                    return Ok((i, vec![name]));
+                }
+            }
+
+            // If `identifier()` fails then just return the original error
+            Err(err)
+        }
+    }
 }
 
 fn expr_path(i: &[u8]) -> IResult<&[u8], Expr> {
@@ -673,8 +692,7 @@ fn expr_any(i: &[u8]) -> IResult<&[u8], Expr> {
         Expr::Range(op, _, right) => Expr::Range(op, Some(Box::new(left)), right),
         _ => unreachable!(),
     });
-    let mut p = alt((range_right, compound, expr_or));
-    Ok(p(i)?)
+    alt((range_right, compound, expr_or))(i)
 }
 
 fn expr_node<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>> {
@@ -686,7 +704,7 @@ fn expr_node<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>> 
         |i| tag_expr_end(i, s),
     ));
     let (i, (_, pws, expr, nws, _)) = p(i)?;
-    Ok((i, Node::Expr(WS(pws.is_some(), nws.is_some()), expr)))
+    Ok((i, Node::Expr(Ws(pws.is_some(), nws.is_some()), expr)))
 }
 
 fn block_call(i: &[u8]) -> IResult<&[u8], Node> {
@@ -702,7 +720,7 @@ fn block_call(i: &[u8]) -> IResult<&[u8], Node> {
     let scope = scope.map(|(scope, _)| scope);
     Ok((
         i,
-        Node::Call(WS(pws.is_some(), nws.is_some()), scope, name, args),
+        Node::Call(Ws(pws.is_some(), nws.is_some()), scope, name, args),
     ))
 }
 
@@ -722,7 +740,7 @@ fn cond_block<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Cond<'a>>
         |i| parse_template(i, s),
     ));
     let (i, (_, pws, _, cond, nws, _, block)) = p(i)?;
-    Ok((i, (WS(pws.is_some(), nws.is_some()), cond, block)))
+    Ok((i, (Ws(pws.is_some(), nws.is_some()), cond, block)))
 }
 
 fn block_if<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>> {
@@ -740,10 +758,9 @@ fn block_if<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>> {
     ));
     let (i, (pws1, cond, nws1, _, block, elifs, _, pws2, _, nws2)) = p(i)?;
 
-    let mut res = Vec::new();
-    res.push((WS(pws1.is_some(), nws1.is_some()), Some(cond), block));
+    let mut res = vec![(Ws(pws1.is_some(), nws1.is_some()), Some(cond), block)];
     res.extend(elifs);
-    Ok((i, Node::Cond(res, WS(pws2.is_some(), nws2.is_some()))))
+    Ok((i, Node::Cond(res, Ws(pws2.is_some(), nws2.is_some()))))
 }
 
 fn match_else_block<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], When<'a>> {
@@ -759,7 +776,7 @@ fn match_else_block<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Whe
     Ok((
         i,
         (
-            WS(pws.is_some(), nws.is_some()),
+            Ws(pws.is_some(), nws.is_some()),
             None,
             MatchParameters::Simple(vec![]),
             block,
@@ -782,7 +799,7 @@ fn when_block<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], When<'a>>
     Ok((
         i,
         (
-            WS(pws.is_some(), nws.is_some()),
+            Ws(pws.is_some(), nws.is_some()),
             Some(variant),
             params.unwrap_or_default(),
             block,
@@ -832,10 +849,10 @@ fn block_match<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>
     Ok((
         i,
         Node::Match(
-            WS(pws1.is_some(), nws1.is_some()),
+            Ws(pws1.is_some(), nws1.is_some()),
             expr,
             arms,
-            WS(pws2.is_some(), nws2.is_some()),
+            Ws(pws2.is_some(), nws2.is_some()),
         ),
     ))
 }
@@ -853,9 +870,9 @@ fn block_let(i: &[u8]) -> IResult<&[u8], Node> {
     Ok((
         i,
         if let Some((_, val)) = val {
-            Node::Let(WS(pws.is_some(), nws.is_some()), var, val)
+            Node::Let(Ws(pws.is_some(), nws.is_some()), var, val)
         } else {
-            Node::LetDecl(WS(pws.is_some(), nws.is_some()), var)
+            Node::LetDecl(Ws(pws.is_some(), nws.is_some()), var)
         },
     ))
 }
@@ -879,11 +896,11 @@ fn block_for<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>> 
     Ok((
         i,
         Node::Loop(
-            WS(pws1.is_some(), nws1.is_some()),
+            Ws(pws1.is_some(), nws1.is_some()),
             var,
             iter,
             block,
-            WS(pws2.is_some(), nws2.is_some()),
+            Ws(pws2.is_some(), nws2.is_some()),
         ),
     ))
 }
@@ -916,10 +933,10 @@ fn block_block<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>
     Ok((
         i,
         Node::BlockDef(
-            WS(pws1.is_some(), nws1.is_some()),
+            Ws(pws1.is_some(), nws1.is_some()),
             name,
             contents,
-            WS(pws2.is_some(), nws2.is_some()),
+            Ws(pws2.is_some(), nws2.is_some()),
         ),
     ))
 }
@@ -935,7 +952,7 @@ fn block_include(i: &[u8]) -> IResult<&[u8], Node> {
     Ok((
         i,
         Node::Include(
-            WS(pws.is_some(), nws.is_some()),
+            Ws(pws.is_some(), nws.is_some()),
             match name {
                 Expr::StrLit(s) => s,
                 _ => panic!("include path must be a string literal"),
@@ -957,7 +974,7 @@ fn block_import(i: &[u8]) -> IResult<&[u8], Node> {
     Ok((
         i,
         Node::Import(
-            WS(pws.is_some(), nws.is_some()),
+            Ws(pws.is_some(), nws.is_some()),
             match name {
                 Expr::StrLit(s) => s,
                 _ => panic!("import path must be a string literal"),
@@ -992,10 +1009,10 @@ fn block_macro<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>
         Node::Macro(
             name,
             Macro {
-                ws1: WS(pws1.is_some(), nws1.is_some()),
+                ws1: Ws(pws1.is_some(), nws1.is_some()),
                 args: params,
                 nodes: contents,
-                ws2: WS(pws2.is_some(), nws2.is_some()),
+                ws2: Ws(pws2.is_some(), nws2.is_some()),
             },
         ),
     ))
@@ -1019,9 +1036,9 @@ fn block_raw<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'a>> 
     Ok((
         i,
         Node::Raw(
-            WS(pws1.is_some(), nws1.is_some()),
+            Ws(pws1.is_some(), nws1.is_some()),
             str_contents,
-            WS(pws2.is_some(), nws2.is_some()),
+            Ws(pws2.is_some(), nws2.is_some()),
         ),
     ))
 }
@@ -1074,7 +1091,7 @@ fn block_comment<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Node<'
         |i| tag_comment_end(i, s),
     ));
     let (i, (_, pws, tail, _)) = p(i)?;
-    Ok((i, Node::Comment(WS(pws.is_some(), tail.ends_with(b"-")))))
+    Ok((i, Node::Comment(Ws(pws.is_some(), tail.ends_with(b"-")))))
 }
 
 fn parse_template<'a>(i: &'a [u8], s: &'a Syntax<'a>) -> IResult<&'a [u8], Vec<Node<'a>>> {
@@ -1127,7 +1144,7 @@ pub fn parse<'a>(src: &'a str, syntax: &'a Syntax<'a>) -> Result<Vec<Node<'a>>, 
 
 #[cfg(test)]
 mod tests {
-    use super::{Expr, Node, WS};
+    use super::{Expr, Node, Ws};
     use crate::Syntax;
 
     fn check_ws_split(s: &str, res: &(&str, &str, &str)) {
@@ -1166,28 +1183,28 @@ mod tests {
         assert_eq!(
             super::parse("{{ strvar|e }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 Filter("e", vec![Var("strvar")]),
             )],
         );
         assert_eq!(
             super::parse("{{ 2|abs }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 Filter("abs", vec![NumLit("2")]),
             )],
         );
         assert_eq!(
             super::parse("{{ -2|abs }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 Filter("abs", vec![Unary("-", NumLit("2").into())]),
             )],
         );
         assert_eq!(
             super::parse("{{ (1 - 2)|abs }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 Filter(
                     "abs",
                     vec![Group(
@@ -1203,11 +1220,81 @@ mod tests {
         let syntax = Syntax::default();
         assert_eq!(
             super::parse("{{ 2 }}", &syntax).unwrap(),
-            vec![Node::Expr(WS(false, false), Expr::NumLit("2"),)],
+            vec![Node::Expr(Ws(false, false), Expr::NumLit("2"),)],
         );
         assert_eq!(
             super::parse("{{ 2.5 }}", &syntax).unwrap(),
-            vec![Node::Expr(WS(false, false), Expr::NumLit("2.5"),)],
+            vec![Node::Expr(Ws(false, false), Expr::NumLit("2.5"),)],
+        );
+    }
+
+    #[test]
+    fn test_parse_var() {
+        let s = Syntax::default();
+
+        assert_eq!(
+            super::parse("{{ foo }}", &s).unwrap(),
+            vec![Node::Expr(Ws(false, false), Expr::Var("foo"))],
+        );
+        assert_eq!(
+            super::parse("{{ foo_bar }}", &s).unwrap(),
+            vec![Node::Expr(Ws(false, false), Expr::Var("foo_bar"))],
+        );
+
+        assert_eq!(
+            super::parse("{{ none }}", &s).unwrap(),
+            vec![Node::Expr(Ws(false, false), Expr::Var("none"))],
+        );
+    }
+
+    #[test]
+    fn test_parse_const() {
+        let s = Syntax::default();
+
+        assert_eq!(
+            super::parse("{{ FOO }}", &s).unwrap(),
+            vec![Node::Expr(Ws(false, false), Expr::Path(vec!["FOO"]))],
+        );
+        assert_eq!(
+            super::parse("{{ FOO_BAR }}", &s).unwrap(),
+            vec![Node::Expr(Ws(false, false), Expr::Path(vec!["FOO_BAR"]))],
+        );
+
+        assert_eq!(
+            super::parse("{{ NONE }}", &s).unwrap(),
+            vec![Node::Expr(Ws(false, false), Expr::Path(vec!["NONE"]))],
+        );
+    }
+
+    #[test]
+    fn test_parse_path() {
+        let s = Syntax::default();
+
+        assert_eq!(
+            super::parse("{{ None }}", &s).unwrap(),
+            vec![Node::Expr(Ws(false, false), Expr::Path(vec!["None"]))],
+        );
+        assert_eq!(
+            super::parse("{{ Some(123) }}", &s).unwrap(),
+            vec![Node::Expr(
+                Ws(false, false),
+                Expr::PathCall(vec!["Some"], vec![Expr::NumLit("123")],),
+            )],
+        );
+
+        assert_eq!(
+            super::parse("{{ Ok(123) }}", &s).unwrap(),
+            vec![Node::Expr(
+                Ws(false, false),
+                Expr::PathCall(vec!["Ok"], vec![Expr::NumLit("123")],),
+            )],
+        );
+        assert_eq!(
+            super::parse("{{ Err(123) }}", &s).unwrap(),
+            vec![Node::Expr(
+                Ws(false, false),
+                Expr::PathCall(vec!["Err"], vec![Expr::NumLit("123")],),
+            )],
         );
     }
 
@@ -1216,7 +1303,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ function(\"123\", 3) }}", &Syntax::default()).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 Expr::VarCall("function", vec![Expr::StrLit("123"), Expr::NumLit("3")]),
             )],
         );
@@ -1224,10 +1311,27 @@ mod tests {
 
     #[test]
     fn test_parse_path_call() {
+        let s = Syntax::default();
+
         assert_eq!(
-            super::parse("{{ self::function(\"123\", 3) }}", &Syntax::default()).unwrap(),
+            super::parse("{{ Option::None }}", &s).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
+                Expr::Path(vec!["Option", "None"])
+            )],
+        );
+        assert_eq!(
+            super::parse("{{ Option::Some(123) }}", &s).unwrap(),
+            vec![Node::Expr(
+                Ws(false, false),
+                Expr::PathCall(vec!["Option", "Some"], vec![Expr::NumLit("123")],),
+            )],
+        );
+
+        assert_eq!(
+            super::parse("{{ self::function(\"123\", 3) }}", &s).unwrap(),
+            vec![Node::Expr(
+                Ws(false, false),
                 Expr::PathCall(
                     vec!["self", "function"],
                     vec![Expr::StrLit("123"), Expr::NumLit("3")],
@@ -1242,14 +1346,14 @@ mod tests {
         assert_eq!(
             super::parse("{{ std::string::String::new() }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 Expr::PathCall(vec!["std", "string", "String", "new"], vec![]),
             )],
         );
         assert_eq!(
             super::parse("{{ ::std::string::String::new() }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 Expr::PathCall(vec!["", "std", "string", "String", "new"], vec![]),
             )],
         );
@@ -1273,7 +1377,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a + b == c }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "==",
                     BinOp("+", Var("a").into(), Var("b").into()).into(),
@@ -1284,7 +1388,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a + b * c - d / e }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "-",
                     BinOp(
@@ -1300,7 +1404,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a * (b + c) / -d }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "/",
                     BinOp(
@@ -1316,7 +1420,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a || b && c || d && e }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "||",
                     BinOp(
@@ -1338,7 +1442,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a + b + c }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "+",
                     BinOp("+", Var("a").into(), Var("b").into()).into(),
@@ -1349,7 +1453,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a * b * c }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "*",
                     BinOp("*", Var("a").into(), Var("b").into()).into(),
@@ -1360,7 +1464,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a && b && c }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "&&",
                     BinOp("&&", Var("a").into(), Var("b").into()).into(),
@@ -1371,7 +1475,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a + b - c + d }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "+",
                     BinOp(
@@ -1387,7 +1491,7 @@ mod tests {
         assert_eq!(
             super::parse("{{ a == b != c > d > e == f }}", &syntax).unwrap(),
             vec![Node::Expr(
-                WS(false, false),
+                Ws(false, false),
                 BinOp(
                     "==",
                     BinOp(
@@ -1418,32 +1522,32 @@ mod tests {
 
         assert_eq!(
             super::parse("{##}", s).unwrap(),
-            vec![Node::Comment(WS(false, false))],
+            vec![Node::Comment(Ws(false, false))],
         );
         assert_eq!(
             super::parse("{#- #}", s).unwrap(),
-            vec![Node::Comment(WS(true, false))],
+            vec![Node::Comment(Ws(true, false))],
         );
         assert_eq!(
             super::parse("{# -#}", s).unwrap(),
-            vec![Node::Comment(WS(false, true))],
+            vec![Node::Comment(Ws(false, true))],
         );
         assert_eq!(
             super::parse("{#--#}", s).unwrap(),
-            vec![Node::Comment(WS(true, true))],
+            vec![Node::Comment(Ws(true, true))],
         );
 
         assert_eq!(
             super::parse("{#- foo\n bar -#}", s).unwrap(),
-            vec![Node::Comment(WS(true, true))],
+            vec![Node::Comment(Ws(true, true))],
         );
         assert_eq!(
             super::parse("{#- foo\n {#- bar\n -#} baz -#}", s).unwrap(),
-            vec![Node::Comment(WS(true, true))],
+            vec![Node::Comment(Ws(true, true))],
         );
         assert_eq!(
             super::parse("{# foo {# bar #} {# {# baz #} qux #} #}", s).unwrap(),
-            vec![Node::Comment(WS(false, false))],
+            vec![Node::Comment(Ws(false, false))],
         );
     }
 }

@@ -73,6 +73,36 @@ fn test_variables_no_escape() {
 }
 
 #[derive(Template)]
+#[template(
+    source = "{{ foo }} {{ foo_bar }} {{ FOO }} {{ FOO_BAR }} {{ self::FOO }} {{ self::FOO_BAR }} {{ Self::BAR }} {{ Self::BAR_BAZ }}",
+    ext = "txt"
+)]
+struct ConstTemplate {
+    foo: &'static str,
+    foo_bar: &'static str,
+}
+
+impl ConstTemplate {
+    const BAR: &'static str = "BAR";
+    const BAR_BAZ: &'static str = "BAR BAZ";
+}
+
+#[test]
+fn test_constants() {
+    let t = ConstTemplate {
+        foo: "foo",
+        foo_bar: "foo bar",
+    };
+    assert_eq!(
+        t.render().unwrap(),
+        "foo foo bar FOO FOO BAR FOO FOO BAR BAR BAR BAZ"
+    );
+}
+
+const FOO: &str = "FOO";
+const FOO_BAR: &str = "FOO BAR";
+
+#[derive(Template)]
 #[template(path = "if.html")]
 struct IfTemplate {
     cond: bool,
@@ -199,6 +229,22 @@ fn test_option() {
     assert_eq!(some.render().unwrap(), "some: foo");
     let none = OptionTemplate { var: None };
     assert_eq!(none.render().unwrap(), "none");
+}
+
+#[derive(Template)]
+#[template(source = "{{ Self::foo(None) }} {{ Self::foo(Some(1)) }}", ext = "txt")]
+struct OptionNoneSomeTemplate;
+
+impl OptionNoneSomeTemplate {
+    fn foo(x: Option<i32>) -> i32 {
+        x.unwrap_or_default()
+    }
+}
+
+#[test]
+fn test_option_none_some() {
+    let t = OptionNoneSomeTemplate;
+    assert_eq!(t.render().unwrap(), "0 1");
 }
 
 #[derive(Template)]
