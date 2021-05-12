@@ -14,10 +14,10 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-actix-web = { version = "4.0.0-beta.1", default-features = false }
+actix-web = { version = "4.0.0-beta.5", default-features = false }
 askama = { version = "0.10", path = "../askama", default-features = false, features = ["with-actix-web", "mime", "mime_guess"] }
 bytes = { version = "1.0" }
 futures-util = { version = "0.3" }
 
 [dev-dependencies]
-actix-rt = { version = "2.0.0-beta.1", default-features = false }
+actix-rt = { version = "2.0.0-beta.5", default-features = false }
