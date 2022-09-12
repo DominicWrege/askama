@@ -16,7 +16,7 @@ edition = "2018"
 maintenance = { status = "actively-developed" }
 
 [dev-dependencies]
-criterion = "0.3"
+criterion = "0.4"
 
 [[bench]]
 name = "all"
